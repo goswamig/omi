@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:friend_private/backend/http/api/apps.dart';
 import 'package:friend_private/backend/preferences.dart';
@@ -12,8 +11,10 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class VerifyIdentityScreen extends StatefulWidget {
+  final PersonaProfileRouting routing;
   const VerifyIdentityScreen({
     super.key,
+    this.routing = PersonaProfileRouting.no_device,
   });
 
   @override
@@ -87,7 +88,12 @@ class _VerifyIdentityScreenState extends State<VerifyIdentityScreen> {
         final message = await getPersonaInitialMessage(username);
         await Posthog().capture(eventName: 'tweet_verified', properties: {'x_handle': handle});
         SharedPreferencesUtil().hasPersonaCreated = true;
-        routeToPage(context, CloneSuccessScreen(message: message));
+        routeToPage(
+            context,
+            CloneSuccessScreen(
+              message: message,
+              routing: widget.routing,
+            ));
       } else {
         if (mounted) {
           showDialog(
@@ -239,7 +245,7 @@ class _VerifyIdentityScreenState extends State<VerifyIdentityScreen> {
                         Column(
                           children: [
                             Text(
-                              tryDecodingText(provider.twitterProfile['name']),
+                              tryDecodingText(provider.twitterProfile['name'] ?? ""),
                               style: TextStyle(
                                 color: Colors.white.withOpacity(0.78),
                                 fontSize: 20,

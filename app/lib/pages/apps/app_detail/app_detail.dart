@@ -96,9 +96,9 @@ class _AppDetailPageState extends State<AppDetailPage> {
       context.read<AppProvider>().setIsAppPublicToggled(!app.private);
     });
     if (app.worksExternally()) {
-      if (app.externalIntegration!.setupInstructionsFilePath.isNotEmpty) {
-        if (app.externalIntegration!.setupInstructionsFilePath.contains('raw.githubusercontent.com')) {
-          getAppMarkdown(app.externalIntegration!.setupInstructionsFilePath).then((value) {
+      if (app.externalIntegration!.setupInstructionsFilePath?.isNotEmpty == true) {
+        if (app.externalIntegration!.setupInstructionsFilePath?.contains('raw.githubusercontent.com') == true) {
+          getAppMarkdown(app.externalIntegration!.setupInstructionsFilePath ?? '').then((value) {
             value = value.replaceAll(
               '](assets/',
               '](https://raw.githubusercontent.com/BasedHardware/Omi/main/plugins/instructions/${app.id}/assets/',
@@ -152,7 +152,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
   @override
   Widget build(BuildContext context) {
     bool isIntegration = app.worksExternally();
-    bool hasSetupInstructions = isIntegration && app.externalIntegration?.setupInstructionsFilePath.isNotEmpty == true;
+    bool hasSetupInstructions = isIntegration && app.externalIntegration?.setupInstructionsFilePath?.isNotEmpty == true;
     bool hasAuthSteps = isIntegration && app.externalIntegration?.authSteps.isNotEmpty == true;
     int stepsCount = app.externalIntegration?.authSteps.length ?? 0;
     return Scaffold(
@@ -294,7 +294,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        app.author,
+                        app.author.decodeString,
                         style: const TextStyle(color: Colors.grey, fontSize: 14),
                       ),
                     ],
@@ -460,13 +460,11 @@ class _AppDetailPageState extends State<AppDetailPage> {
                                                   'This app will access your data. Omi AI is not responsible for how your data is used, modified, or deleted by this app',
                                               checkboxText: "Don't show it again",
                                               checkboxValue: !showInstallAppConfirmation,
-                                              updateCheckboxValue: (value) {
-                                                if (value != null) {
-                                                  setState(() {
-                                                    showInstallAppConfirmation = !value;
-                                                    SharedPreferencesUtil().showInstallAppConfirmation = !value;
-                                                  });
-                                                }
+                                              onCheckboxChanged: (value) {
+                                                setState(() {
+                                                  showInstallAppConfirmation = !value;
+                                                  SharedPreferencesUtil().showInstallAppConfirmation = !value;
+                                                });
                                               },
                                               onConfirm: () {
                                                 _toggleApp(app.id, true);
@@ -615,17 +613,17 @@ class _AppDetailPageState extends State<AppDetailPage> {
                       onTap: () async {
                         if (app.externalIntegration != null) {
                           if (app.externalIntegration!.setupInstructionsFilePath
-                              .contains('raw.githubusercontent.com')) {
+                              ?.contains('raw.githubusercontent.com') == true) {
                             await routeToPage(
                               context,
                               MarkdownViewer(title: 'Setup Instructions', markdown: instructionsMarkdown ?? ''),
                             );
                           } else {
-                            if (app.externalIntegration!.isInstructionsUrl) {
-                              await launchUrl(Uri.parse(app.externalIntegration!.setupInstructionsFilePath));
+                            if (app.externalIntegration!.isInstructionsUrl == true) {
+                              await launchUrl(Uri.parse(app.externalIntegration!.setupInstructionsFilePath ?? ''));
                             } else {
                               var m = app.externalIntegration!.setupInstructionsFilePath;
-                              routeToPage(context, MarkdownViewer(title: 'Setup Instructions', markdown: m));
+                              routeToPage(context, MarkdownViewer(title: 'Setup Instructions', markdown: m ?? ''));
                             }
                           }
                         }
@@ -637,7 +635,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                       ),
                       title: const Text(
                         'Integration Instructions',
-                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+                        style: TextStyle(fontWeight: FontWeight.w500, fontSize: 18),
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -744,10 +742,11 @@ class _AppDetailPageState extends State<AppDetailPage> {
                 title: 'About the ${app.isNotPersona() ? 'App' : 'Persona'}',
                 description: app.description,
                 showChips: true,
-                chips: app
+                capabilityChips: app
                     .getCapabilitiesFromIds(context.read<AddAppProvider>().capabilities)
                     .map((e) => e.title)
                     .toList(),
+                connectionChips: app.getConnectedAccountNames(),
               ),
 
               app.conversationPrompt != null

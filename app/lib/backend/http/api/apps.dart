@@ -415,6 +415,65 @@ Future<String> getGenratedDescription(String name, String description) async {
   }
 }
 
+// API Keys
+Future<List<AppApiKey>> listApiKeysServer(String appId) async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/apps/$appId/keys',
+    headers: {},
+    body: '',
+    method: 'GET',
+  );
+  try {
+    if (response == null || response.statusCode != 200) return [];
+    log('listApiKeysServer: ${response.body}');
+    return AppApiKey.fromJsonList(jsonDecode(response.body));
+  } catch (e, stackTrace) {
+    debugPrint(e.toString());
+    CrashReporting.reportHandledCrash(e, stackTrace);
+    return [];
+  }
+}
+
+Future<Map<String, dynamic>> createApiKeyServer(String appId) async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/apps/$appId/keys',
+    headers: {},
+    body: '',
+    method: 'POST',
+  );
+  try {
+    if (response == null || response.statusCode != 200) {
+      throw Exception('Failed to create API key');
+    }
+    log('createApiKeyServer: ${response.body}');
+    return jsonDecode(response.body);
+  } catch (e, stackTrace) {
+    debugPrint(e.toString());
+    CrashReporting.reportHandledCrash(e, stackTrace);
+    throw Exception('Failed to create API key: ${e.toString()}');
+  }
+}
+
+Future<bool> deleteApiKeyServer(String appId, String keyId) async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/apps/$appId/keys/$keyId',
+    headers: {},
+    body: '',
+    method: 'DELETE',
+  );
+  try {
+    if (response == null || response.statusCode != 200) {
+      throw Exception('Failed to delete API key');
+    }
+    log('deleteApiKeyServer: ${response.body}');
+    return true;
+  } catch (e, stackTrace) {
+    debugPrint(e.toString());
+    CrashReporting.reportHandledCrash(e, stackTrace);
+    throw Exception('Failed to delete API key: ${e.toString()}');
+  }
+}
+
 Future<Map> createPersonaApp(File file, Map<String, dynamic> personaData) async {
   var request = http.MultipartRequest(
     'POST',
@@ -505,7 +564,6 @@ Future<Map?> getTwitterProfileData(String handle) async {
   }
 }
 
-
 Future<(bool, String?)> verifyTwitterOwnership(String username, String handle, String? personaId) async {
   var url = '${Env.apiBaseUrl}v1/personas/twitter/verify-ownership?username=$username&handle=$handle';
   if (personaId != null) {
@@ -581,6 +639,42 @@ Future<String?> generateUsername(String handle) async {
     log('generateUsername: ${response.body}');
     var res = jsonDecode(response.body);
     return res['username'];
+  } catch (e, stackTrace) {
+    debugPrint(e.toString());
+    CrashReporting.reportHandledCrash(e, stackTrace);
+    return null;
+  }
+}
+
+Future<bool> migrateAppOwnerId(String oldId) async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/apps/migrate-owner?old_id=$oldId',
+    headers: {},
+    body: '',
+    method: 'POST',
+  );
+  try {
+    if (response == null || response.statusCode != 200) return false;
+    log('migrateAppOwnerId: ${response.body}');
+    return true;
+  } catch (e, stackTrace) {
+    debugPrint(e.toString());
+    CrashReporting.reportHandledCrash(e, stackTrace);
+    return false;
+  }
+}
+
+Future<Map<String, dynamic>?> getUpsertUserPersonaServer() async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/user/persona',
+    headers: {},
+    body: '',
+    method: 'POST',
+  );
+  try {
+    if (response == null || response.statusCode != 200) return null;
+    log('getUpsertUserPersonaServer: ${response.body}');
+    return jsonDecode(response.body);
   } catch (e, stackTrace) {
     debugPrint(e.toString());
     CrashReporting.reportHandledCrash(e, stackTrace);

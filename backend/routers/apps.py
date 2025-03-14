@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from datetime import datetime, timezone
 from typing import List
 import requests
@@ -9,7 +10,8 @@ from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, H
 from database.apps import change_app_approval_status, get_unapproved_public_apps_db, \
     add_app_to_db, update_app_in_db, delete_app_from_db, update_app_visibility_in_db, \
     get_personas_by_username_db, get_persona_by_id_db, delete_persona_db, get_persona_by_twitter_handle_db, \
-    get_persona_by_username_db
+    get_persona_by_username_db, migrate_app_owner_id_db, get_user_persona_by_uid, get_omi_persona_apps_by_uid_db, \
+    create_api_key_db, list_api_keys_db, delete_api_key_db
 from database.auth import get_user_from_uid
 from database.notifications import get_token_only
 from database.redis_db import delete_generic_cache, get_specific_user_review, increase_app_installs_count, \
@@ -18,13 +20,13 @@ from utils.apps import get_available_apps, get_available_app_by_id, get_approved
     get_available_app_by_id_with_reviews, set_app_review, get_app_reviews, add_tester, is_tester, \
     add_app_access_for_tester, remove_app_access_for_tester, upsert_app_payment_link, get_is_user_paid_app, \
     is_permit_payment_plan_get, generate_persona_prompt, generate_persona_desc, get_persona_by_uid, \
-    increment_username
+    increment_username, generate_api_key
 
 from utils.llm import generate_description, generate_persona_intro_message
 
 from utils.notifications import send_notification
 from utils.other import endpoints as auth
-from models.app import App
+from models.app import App, ActionType
 from utils.other.storage import upload_plugin_logo, delete_plugin_logo, upload_app_thumbnail, get_app_thumbnail_url
 from utils.social import get_twitter_profile, get_twitter_timeline, verify_latest_tweet, \
     upsert_persona_from_twitter_profile, add_twitter_to_persona
@@ -68,18 +70,30 @@ def create_app(app_data: str = Form(...), file: UploadFile = File(...), uid=Depe
                 raise HTTPException(status_code=422, detail='Price cannot be a negative value')
             if data.get('payment_plan') is None:
                 raise HTTPException(status_code=422, detail='Payment plan is required')
+
     if external_integration := data.get('external_integration'):
-        external_integration['webhook_url'] = external_integration['webhook_url'].strip()
-        if external_integration.get('triggers_on') is None:
-            raise HTTPException(status_code=422, detail='Triggers on is required')
-        # check if setup_instructions_file_path is a single url or a just a string of text
-        if external_integration.get('setup_instructions_file_path'):
-            external_integration['setup_instructions_file_path'] = external_integration[
-                'setup_instructions_file_path'].strip()
-            if external_integration['setup_instructions_file_path'].startswith('http'):
-                external_integration['is_instructions_url'] = True
-            else:
-                external_integration['is_instructions_url'] = False
+        if external_integration.get('triggers_on') is None and \
+                len(external_integration.get('actions', [])) == 0:
+            raise HTTPException(status_code=422, detail='Triggers on or actions is required')
+        # Trigger on
+        if external_integration.get('triggers_on'):
+            external_integration['webhook_url'] = external_integration['webhook_url'].strip()
+            if external_integration.get('setup_instructions_file_path'):
+                external_integration['setup_instructions_file_path'] = external_integration[
+                    'setup_instructions_file_path'].strip()
+                if external_integration['setup_instructions_file_path'].startswith('http'):
+                    external_integration['is_instructions_url'] = True
+                else:
+                    external_integration['is_instructions_url'] = False
+
+        # Acitons
+        if actions := external_integration.get('actions'):
+            for action in actions:
+                if not action.get('action'):
+                    raise HTTPException(status_code=422, detail='Action field is required for each action')
+                if action.get('action') not in [action_type.value for action_type in ActionType]:
+                    raise HTTPException(status_code=422,
+                                        detail=f'Unsupported action type. Supported types: {", ".join([action_type.value for action_type in ActionType])}')
     os.makedirs(f'_temp/plugins', exist_ok=True)
     file_path = f"_temp/plugins/{file.filename}"
     with open(file_path, 'wb') as f:
@@ -92,7 +106,7 @@ def create_app(app_data: str = Form(...), file: UploadFile = File(...), uid=Depe
     if 'external_integration' in data:
         ext_int = data['external_integration']
         if (not ext_int.get('app_home_url') and
-            ext_int.get('auth_steps') and
+                ext_int.get('auth_steps') and
                 len(ext_int['auth_steps']) == 1):
             ext_int['app_home_url'] = ext_int['auth_steps'][0]['url']
 
@@ -106,7 +120,8 @@ def create_app(app_data: str = Form(...), file: UploadFile = File(...), uid=Depe
 
 
 @router.post('/v1/personas', tags=['v1'])
-async def create_persona(persona_data: str = Form(...), file: UploadFile = File(...), uid=Depends(auth.get_current_user_uid)):
+async def create_persona(persona_data: str = Form(...), file: UploadFile = File(...),
+                         uid=Depends(auth.get_current_user_uid)):
     data = json.loads(persona_data)
     data['approved'] = False
     data['deleted'] = False
@@ -121,7 +136,7 @@ async def create_persona(persona_data: str = Form(...), file: UploadFile = File(
     data['email'] = user['email']
 
     if 'username' not in data or data['username'] == '' or data['username'] is None:
-        data['username'] = data['name'].replace(' ', '')
+        data['username'] = data['name'].replace(' ', '').lower()
         data['username'] = increment_username(data['username'])
     save_username(data['username'], uid)
 
@@ -143,26 +158,38 @@ async def create_persona(persona_data: str = Form(...), file: UploadFile = File(
 
 
 @router.patch('/v1/personas/{persona_id}', tags=['v1'])
-def update_persona(persona_id: str, persona_data: str = Form(...), file: UploadFile = File(None),
-                   uid=Depends(auth.get_current_user_uid)):
+async def update_persona(persona_id: str, persona_data: str = Form(...), file: UploadFile = File(None),
+                         uid=Depends(auth.get_current_user_uid)):
     data = json.loads(persona_data)
     persona = get_available_app_by_id(persona_id, uid)
     if not persona:
         raise HTTPException(status_code=404, detail='Persona not found')
     if persona['uid'] != uid:
         raise HTTPException(status_code=403, detail='You are not authorized to perform this action')
+
+    # Image
     if file:
-        delete_plugin_logo(persona['image'])
+        if 'image' in persona and len(persona['image']) > 0 and \
+                persona['image'].startswith('https://storage.googleapis.com/'):
+            delete_plugin_logo(persona['image'])
         os.makedirs(f'_temp/plugins', exist_ok=True)
         file_path = f"_temp/plugins/{file.filename}"
         with open(file_path, 'wb') as f:
             f.write(file.file.read())
         img_url = upload_plugin_logo(file_path, persona_id)
         data['image'] = img_url
+
     save_username(data['username'], uid)
     data['description'] = generate_persona_desc(uid, data['name'])
     data['updated_at'] = datetime.now(timezone.utc)
+
+    # Update 'omi' connected_accounts
+    if 'omi' in data.get('connected_accounts', []) and \
+            'omi' not in persona.get('connected_accounts', []):
+        data['persona_prompt'] = await generate_persona_prompt(uid, persona)
+
     update_app_in_db(data)
+
     if persona['approved'] and (persona['private'] is None or persona['private'] is False):
         delete_generic_cache('get_public_approved_apps_data')
     delete_app_cache_by_id(persona_id)
@@ -183,6 +210,56 @@ def get_persona_details(uid: str = Depends(auth.get_current_user_uid)):
             raise HTTPException(status_code=403, detail='You are not authorized to view this Persona')
 
     return app
+
+@router.post('/v1/user/persona', tags=['v1'])
+async def get_or_create_user_persona(uid: str = Depends(auth.get_current_user_uid)):
+    """Get or create a user persona.
+
+    If the user already has a persona, return it.
+    If not, create a new one with default values.
+    """
+    # Check if user already has a persona
+    persona = get_user_persona_by_uid(uid)
+    if persona:
+        # Return existing persona
+        return persona
+
+    # Create a new persona for the user
+    user = get_user_from_uid(uid)
+
+    # Generate a unique ID for the persona
+    persona_id = str(ULID())
+
+    # Create persona data
+    persona_data = {
+        'id': persona_id,
+        'name': user.get('display_name', 'My Persona'),
+        'username': increment_username((user.get('display_name') or 'MyPersona').replace(' ', '').lower()),
+        'description': f"This is {user.get('display_name', 'my')} personal AI clone.",
+        'image': '',  # Empty image as specified in the task
+        'uid': uid,
+        'author': user.get('display_name', ''),
+        'email': user.get('email', ''),
+        'approved': False,
+        'deleted': False,
+        'status': 'under-review',
+        'category': 'personality-emulation',
+        'capabilities': ['persona'],
+        'connected_accounts': ['omi'],
+        'created_at': datetime.now(timezone.utc),
+        'private': True
+    }
+
+    # Generate persona prompt
+    persona_data['persona_prompt'] = await generate_persona_prompt(uid, persona_data)
+
+    # Save username
+    save_username(persona_data['username'], uid)
+
+    # Add persona to database
+    add_app_to_db(persona_data)
+
+    return persona_data
 
 
 @router.get('/v1/apps/check-username', tags=['v1'])
@@ -208,7 +285,9 @@ def update_app(app_id: str, app_data: str = Form(...), file: UploadFile = File(N
     if plugin['uid'] != uid:
         raise HTTPException(status_code=403, detail='You are not authorized to perform this action')
     if file:
-        delete_plugin_logo(plugin['image'])
+        if 'image' in plugin and len(plugin['image']) > 0 and \
+                plugin['image'].startswith('https://storage.googleapis.com/'):
+            delete_plugin_logo(plugin['image'])
         os.makedirs(f'_temp/plugins', exist_ok=True)
         file_path = f"_temp/plugins/{file.filename}"
         with open(file_path, 'wb') as f:
@@ -221,7 +300,7 @@ def update_app(app_id: str, app_data: str = Form(...), file: UploadFile = File(N
     if 'external_integration' in data:
         ext_int = data['external_integration']
         if (not ext_int.get('app_home_url') and
-            ext_int.get('auth_steps') and
+                ext_int.get('auth_steps') and
                 len(ext_int['auth_steps']) == 1):
             ext_int['app_home_url'] = ext_int['auth_steps'][0]['url']
 
@@ -405,6 +484,9 @@ def get_plugin_capabilities():
             {'title': 'Audio Bytes', 'id': 'audio_bytes'},
             {'title': 'Memory Creation', 'id': 'memory_creation'},
             {'title': 'Transcript Processed', 'id': 'transcript_processed'},
+        ], 'actions': [
+            {'title': 'Create conversations', 'id': 'create_conversation', 'doc_url': 'https://docs.omi.me/docs/developer/apps/IntegrationActions'},
+            {'title': 'Create facts', 'id': 'create_facts', 'doc_url': 'https://docs.omi.me/docs/developer/apps/IntegrationActions'}
         ]},
         {'title': 'Notification', 'id': 'proactive_notification', 'scopes': [
             {'title': 'User Name', 'id': 'user_name'},
@@ -456,8 +538,13 @@ async def get_twitter_profile_data(handle: str, uid: str = Depends(auth.get_curr
     if res['avatar']:
         res['avatar'] = res['avatar'].replace('_normal', '')
 
+    # By user persona first
+    persona = get_user_persona_by_uid(uid)
+
     # Get matching persona if exists
-    persona = get_persona_by_twitter_handle_db(handle)
+    if not persona:
+        persona = get_persona_by_twitter_handle_db(handle)
+
     if persona:
         res['persona_id'] = persona['id']
         res['persona_username'] = persona['username']
@@ -467,10 +554,10 @@ async def get_twitter_profile_data(handle: str, uid: str = Depends(auth.get_curr
 
 @router.get('/v1/personas/twitter/verify-ownership', tags=['v1'])
 async def verify_twitter_ownership_tweet(
-    username: str,
-    handle: str,
-    uid: str = Depends(auth.get_current_user_uid),
-    persona_id: str | None = None
+        username: str,
+        handle: str,
+        uid: str = Depends(auth.get_current_user_uid),
+        persona_id: str | None = None
 ):
     # Get user info to check auth provider
     user = get_user_from_uid(uid)
@@ -494,6 +581,7 @@ async def verify_twitter_ownership_tweet(
         else:
             if persona_id:
                 persona = await add_twitter_to_persona(handle, persona_id)
+
     if persona:
         res['persona_id'] = persona['id']
 
@@ -509,6 +597,38 @@ async def get_twitter_initial_message(username: str, uid: str = Depends(auth.get
     return {'message': ''}
 
 
+@router.post('/v1/apps/migrate-owner', tags=['v1'])
+async def migrate_app_owner(old_id, uid: str = Depends(auth.get_current_user_uid)):
+    # Migrate app ownership in the database
+    migrate_app_owner_id_db(uid, old_id)
+
+    # Start async task to update persona connected accounts
+    asyncio.create_task(update_omi_persona_connected_accounts(uid))
+
+    return {"status": "ok", "message": "Migration started"}
+
+async def update_omi_persona_connected_accounts(uid: str):
+    try:
+        # Get all personas owned by the user
+        personas = get_omi_persona_apps_by_uid_db(uid)
+
+        # Update each persona to add 'omi' to connected_accounts
+        for persona in personas:
+            connected_accounts = persona.get('connected_accounts', [])
+            if 'omi' not in connected_accounts:
+                connected_accounts.append('omi')
+
+                # Update the persona with the new connected_accounts
+                update_data = persona
+                update_data['connected_accounts'] = connected_accounts
+                update_data['updated_at'] = datetime.now(timezone.utc)
+                update_data['persona_prompt'] = await generate_persona_prompt(uid, update_data)
+                update_data['description'] = generate_persona_desc(uid, update_data['name'])
+
+                update_app_in_db(update_data)
+                delete_app_cache_by_id(persona['id'])
+    except Exception as e:
+        print(f"Error updating persona connected accounts: {e}")
 
 
 # ******************************************************
@@ -698,3 +818,58 @@ def get_personas(persona_id: str, secret_key: str = Header(...)):
         raise HTTPException(status_code=404, detail='Persona not found')
     print(persona)
     return persona
+
+
+@router.post('/v1/apps/{app_id}/keys', tags=['v1'])
+def create_api_key_for_app(app_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    app = get_available_app_by_id(app_id, uid)
+    if not app:
+        raise HTTPException(status_code=404, detail='App not found')
+
+    if app.get('uid') != uid:
+        raise HTTPException(status_code=403, detail='You are not authorized to create API keys for this app')
+
+    key, hashed_key, label = generate_api_key()
+
+    data = {
+        'id': str(ULID()),
+        'hashed': hashed_key,
+        'label': label,
+        'created_at': datetime.now(timezone.utc)
+    }
+    create_api_key_db(app_id, data)
+
+    # Return both the raw key (for one-time display to user) and the stored data
+    return {
+        'id': data['id'],
+        'secret': key,  # with sk_
+        'label': label,
+        'created_at': data['created_at']
+    }
+
+
+@router.get('/v1/apps/{app_id}/keys', tags=['v1'])
+def list_api_keys(app_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    app = get_available_app_by_id(app_id, uid)
+    if not app:
+        raise HTTPException(status_code=404, detail='App not found')
+
+    if app.get('uid') != uid:
+        raise HTTPException(status_code=403, detail='You are not authorized to view API keys for this app')
+
+    keys = list_api_keys_db(app_id)
+    return keys
+
+
+@router.delete('/v1/apps/{app_id}/keys/{key_id}', tags=['v1'])
+def delete_api_key(app_id: str, key_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    app = get_available_app_by_id(app_id, uid)
+    if not app:
+        raise HTTPException(status_code=404, detail='App not found')
+
+    if app.get('uid') != uid:
+        raise HTTPException(status_code=403, detail='You are not authorized to delete API keys for this app')
+
+    delete_api_key_db(app_id, key_id)
+
+    return {'status': 'ok', 'message': 'API key deleted'}

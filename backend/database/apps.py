@@ -294,6 +294,28 @@ def get_persona_by_uid_db(uid: str):
         return None
     return doc.to_dict()
 
+def get_user_persona_by_uid(uid: str):
+    filters = [
+        FieldFilter('capabilities', 'array_contains', 'persona'),
+        FieldFilter('category', '==', 'personality-emulation'),
+        FieldFilter('deleted', '==', False),
+        FieldFilter('uid', '==', uid),
+    ]
+    persona_ref = db.collection('plugins_data').where(filter=BaseCompositeFilter('AND', filters)).limit(1)
+    docs = persona_ref.get()
+    if not docs:
+        return None
+    doc = next(iter(docs), None)
+    if not doc:
+        return None
+    return {'id': doc.id, **doc.to_dict()}
+
+def create_user_persona_db(persona_data: dict):
+    """Create a new user persona in the database"""
+    persona_ref = db.collection('plugins_data')
+    persona_ref.add(persona_data, persona_data['id'])
+    return persona_data
+
 
 def get_persona_by_twitter_handle_db(handle: str):
     filters = [
@@ -338,6 +360,16 @@ def get_omi_personas_by_uid_db(uid: str):
     docs = [doc.to_dict() for doc in docs if 'omi' in doc.to_dict().get('connected_accounts', [])]
     return docs
 
+def get_omi_persona_apps_by_uid_db(uid: str):
+    filters = [FieldFilter('uid', '==', uid),
+               FieldFilter('category', '==', 'personality-emulation'),
+               FieldFilter('deleted', '==', False)]
+    persona_ref = db.collection('plugins_data').where(filter=BaseCompositeFilter('AND', filters))
+    docs = persona_ref.get()
+    if not docs:
+        return []
+    docs = [doc.to_dict() for doc in docs]
+    return docs
 
 def add_persona_to_db(persona_data: dict):
     persona_ref = db.collection('plugins_data')
@@ -347,3 +379,54 @@ def add_persona_to_db(persona_data: dict):
 def update_persona_in_db(persona_data: dict):
     persona_ref = db.collection('plugins_data').document(persona_data['id'])
     persona_ref.update(persona_data)
+
+
+def migrate_app_owner_id_db(new_id: str, old_id: str):
+    filters = [FieldFilter('uid', '==', old_id), FieldFilter('deleted', '==', False)]
+    apps_ref = db.collection('plugins_data').where(filter=BaseCompositeFilter('AND', filters)).stream()
+    for app in apps_ref:
+        app_ref = db.collection('plugins_data').document(app.id)
+        app_ref.update({'uid': new_id})
+
+
+def create_api_key_db(app_id: str, api_key_data: dict):
+    """Create a new API key for an app in the database"""
+    api_key_ref = db.collection('plugins_data').document(app_id).collection('api_keys').document(api_key_data['id'])
+    api_key_ref.set(api_key_data)
+    return api_key_data
+
+
+def get_api_key_by_id_db(app_id: str, key_id: str):
+    """Get an API key by its ID"""
+    api_key_ref = db.collection('plugins_data').document(app_id).collection('api_keys').document(key_id)
+    doc = api_key_ref.get()
+    if doc.exists:
+        return doc.to_dict()
+    return None
+
+
+def get_api_key_by_hash_db(app_id: str, hashed_key: str):
+    """Get an API key by its hash value"""
+    filters = [FieldFilter('hashed', '==', hashed_key)]
+    api_keys_ref = db.collection('plugins_data').document(app_id).collection('api_keys').where(
+        filter=BaseCompositeFilter('AND', filters)).limit(1)
+    docs = api_keys_ref.get()
+    if not docs:
+        return None
+    doc = next(iter(docs), None)
+    if not doc:
+        return None
+    return doc.to_dict()
+
+
+def list_api_keys_db(app_id: str):
+    """List all API keys for an app (excluding the hashed values)"""
+    api_keys_ref = db.collection('plugins_data').document(app_id).collection('api_keys').order_by('created_at', direction='DESCENDING').stream()
+    return [{k: v for k, v in doc.to_dict().items() if k != 'hashed'} for doc in api_keys_ref]
+
+
+def delete_api_key_db(app_id: str, key_id: str):
+    """Delete an API key"""
+    api_key_ref = db.collection('plugins_data').document(app_id).collection('api_keys').document(key_id)
+    api_key_ref.delete()
+    return True
